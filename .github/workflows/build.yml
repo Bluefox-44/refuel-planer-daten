@@ -35,7 +35,7 @@ jobs:
           python-version: '3.12'
 
       - name: Python-Pakete installieren
-        run: pip install osmium shapely
+        run: pip install osmium "shapely>=2.0" pillow numpy
 
       - name: Geofabrik-Daten laden
         run: |
@@ -52,9 +52,27 @@ jobs:
             nwr/tourism=alpine_hut,wilderness_hut \
             -o filtered.osm.pbf --overwrite
 
+      - name: Vorfiltern (Gemeinden)
+        run: |
+          osmium tags-filter switzerland-latest.osm.pbf \
+            r/admin_level=4,8 \
+            w/highway=residential,unclassified,tertiary,secondary,primary,trunk,service,track \
+            n/place=city,town \
+            n/mountain_pass=yes \
+            -o gemeinden.osm.pbf --overwrite
+
       - name: Kacheln bauen
         shell: bash  # mit pipefail, sonst verdeckt tee einen Fehler von build.py
         run: python tools/build.py --pbf filtered.osm.pbf --poly switzerland.poly --out site | tee build.log
+
+      - name: Terrain-Kacheln cachen
+        uses: actions/cache@v4
+        with:
+          path: terrain-cache
+          key: terrain-tiles-z11-v1
+
+      - name: Gemeinden bauen
+        run: python tools/gemeinden.py --pbf gemeinden.osm.pbf --out site --cache terrain-cache
 
       - name: Keepalive (STAND.md)
         run: |
