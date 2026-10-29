@@ -1,0 +1,87 @@
+name: Daten bauen und veröffentlichen
+
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/**'
+      - '.github/workflows/**'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: osmium-tool installieren
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y osmium-tool
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Python-Pakete installieren
+        run: pip install osmium shapely
+
+      - name: Geofabrik-Daten laden
+        run: |
+          curl -fL -o switzerland-latest.osm.pbf https://download.geofabrik.de/europe/switzerland-latest.osm.pbf
+          curl -fL -o switzerland.poly https://download.geofabrik.de/europe/switzerland.poly
+
+      - name: Vorfiltern
+        run: |
+          osmium tags-filter switzerland-latest.osm.pbf \
+            nwr/shop=bakery,pastry,supermarket,convenience,kiosk,deli,farm \
+            nwr/amenity=cafe,restaurant,fast_food,ice_cream,fuel,drinking_water,vending_machine,fountain,shelter \
+            nwr/railway=station,halt \
+            nwr/highway=bus_stop \
+            nwr/tourism=alpine_hut,wilderness_hut \
+            -o filtered.osm.pbf --overwrite
+
+      - name: Kacheln bauen
+        shell: bash  # mit pipefail, sonst verdeckt tee einen Fehler von build.py
+        run: python tools/build.py --pbf filtered.osm.pbf --poly switzerland.poly --out site | tee build.log
+
+      - name: Keepalive (STAND.md)
+        run: |
+          SUMMARY=$(tail -n 1 build.log)
+          printf '# Stand\n\n%s\n' "$SUMMARY" > STAND.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add STAND.md
+          if git diff --cached --quiet; then
+            echo "STAND.md unverändert"
+          else
+            git commit -m "Stand aktualisiert"
+            git push
+          fi
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
