@@ -42,15 +42,39 @@ jobs:
           curl -fL -o switzerland-latest.osm.pbf https://download.geofabrik.de/europe/switzerland-latest.osm.pbf
           curl -fL -o switzerland.poly https://download.geofabrik.de/europe/switzerland.poly
 
-      - name: Vorfiltern
+      - name: Vorfiltern (Schweiz und Nachbargebiete)
         run: |
-          osmium tags-filter switzerland-latest.osm.pbf \
-            nwr/shop=bakery,pastry,supermarket,convenience,kiosk,deli,farm \
-            nwr/amenity=cafe,restaurant,fast_food,ice_cream,fuel,drinking_water,vending_machine,fountain,shelter \
-            nwr/railway=station,halt \
-            nwr/highway=bus_stop \
-            nwr/tourism=alpine_hut,wilderness_hut \
-            -o filtered.osm.pbf --overwrite
+          FILTER="nwr/shop=bakery,pastry,supermarket,convenience,kiosk,deli,farm
+          nwr/amenity=cafe,restaurant,fast_food,ice_cream,fuel,drinking_water,vending_machine,fountain,shelter
+          nwr/railway=station,halt
+          nwr/highway=bus_stop
+          nwr/tourism=alpine_hut,wilderness_hut"
+          mkdir -p parts
+          osmium tags-filter switzerland-latest.osm.pbf $FILTER -o parts/ch.osm.pbf --overwrite
+          # Nachbar-Extrakte: einzeln laden, filtern, Original sofort loeschen (Platz auf dem Runner)
+          for name in \
+            europe/germany/baden-wuerttemberg \
+            europe/germany/bayern/schwaben \
+            europe/france/alsace \
+            europe/france/franche-comte \
+            europe/france/rhone-alpes \
+            europe/italy/nord-ovest \
+            europe/italy/nord-est \
+            europe/austria \
+            europe/liechtenstein; do
+            short=$(basename "$name")
+            echo "== $name"
+            curl -fL --retry 3 -o "nb-$short.osm.pbf" "https://download.geofabrik.de/$name-latest.osm.pbf"
+            osmium tags-filter "nb-$short.osm.pbf" $FILTER -o "parts/$short.osm.pbf" --overwrite
+            rm -f "nb-$short.osm.pbf"
+          done
+          ls -l parts
+          # Auf CH + 20-km-Band zuschneiden und zusammenfuehren
+          BBOX=$(python tools/build.py --poly switzerland.poly --print-bbox)
+          echo "Bounding-Box: $BBOX"
+          osmium merge parts/*.osm.pbf -o merged.osm.pbf --overwrite
+          osmium extract -b "$BBOX" merged.osm.pbf -o filtered.osm.pbf --overwrite
+          ls -l filtered.osm.pbf
 
       - name: Vorfiltern (Gemeinden)
         run: |
@@ -63,7 +87,7 @@ jobs:
 
       - name: Kacheln bauen
         shell: bash  # mit pipefail, sonst verdeckt tee einen Fehler von build.py
-        run: python tools/build.py --pbf filtered.osm.pbf --poly switzerland.poly --out site | tee build.log
+        run: python tools/build.py --pbf filtered.osm.pbf --ts-pbf switzerland-latest.osm.pbf --poly switzerland.poly --out site | tee build.log
 
       - name: Terrain-Kacheln cachen
         uses: actions/cache@v4

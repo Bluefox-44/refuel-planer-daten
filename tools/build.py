@@ -18,6 +18,7 @@ import sys
 from collections import Counter
 
 import osmium
+from shapely import affinity
 from shapely.geometry import Polygon, box
 from shapely.ops import unary_union
 from shapely.prepared import prep
@@ -203,6 +204,18 @@ def parse_poly(path):
     return geom
 
 
+def coverage_area(region, band_km):
+    """Gebiet, fuer das Daten vorliegen: CH-Polygon plus Band rund um die Grenze.
+
+    Gepuffert wird in einem Laengengrad-skalierten Raum, damit das Band in
+    Nord-Sued- und Ost-West-Richtung ungefaehr gleich breit (in km) ist.
+    """
+    k = math.cos(math.radians(46.8))
+    scaled = affinity.scale(region, xfact=k, yfact=1.0, origin=(0, 0))
+    buffered = scaled.buffer(band_km / 111.2)
+    return affinity.scale(buffered, xfact=1.0 / k, yfact=1.0, origin=(0, 0))
+
+
 def pbf_timestamp(path):
     try:
         reader = osmium.io.Reader(path)
@@ -249,18 +262,29 @@ def write_index(out_dir, generated, osm_ts, n_elem, n_complete, n_partial):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pbf", required=True)
+    ap.add_argument("--pbf")
     ap.add_argument("--poly", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out")
+    ap.add_argument("--ts-pbf", help="PBF, aus deren Header der OSM-Zeitstempel gelesen wird (Standard: --pbf)")
+    ap.add_argument("--band-km", type=float, default=20.0,
+                    help="Breite des Bandes um die Schweiz, fuer das Daten vorliegen")
+    ap.add_argument("--print-bbox", action="store_true",
+                    help="Nur die Bounding-Box des Abdeckungsgebiets ausgeben (minlon,minlat,maxlon,maxlat)")
     args = ap.parse_args()
 
-    region = parse_poly(args.poly)
+    region = coverage_area(parse_poly(args.poly), args.band_km)
+    if args.print_bbox:
+        b = region.bounds
+        print("%.4f,%.4f,%.4f,%.4f" % (b[0], b[1], b[2], b[3]))
+        return
+    if not args.pbf or not args.out:
+        ap.error("--pbf und --out sind erforderlich")
     prepared = prep(region)
 
     handler = Collector()
     handler.apply_file(args.pbf, locations=True, idx="flex_mem")
 
-    # Intersecting tiles bestimmen
+    # Kacheln im Abdeckungsgebiet (CH + Band): vollstaendig = ganz im Gebiet mit Daten
     minx, miny, maxx, maxy = region.bounds
     ty0, ty1 = math.floor(miny / TILE_LAT), math.floor(maxy / TILE_LAT)
     tx0, tx1 = math.floor(minx / TILE_LON), math.floor(maxx / TILE_LON)
@@ -275,7 +299,12 @@ def main():
     # Elemente den Kacheln zuordnen
     tiles = {}
     cats = Counter()
+    seen = set()  # Dubletten aus ueberlappenden Extrakten vermeiden
     for cat, el in handler.elements:
+        key = (el["type"], el["id"])
+        if key in seen:
+            continue
+        seen.add(key)
         ty, tx = tile_of(el["lat"], el["lon"])
         tid = "%d_%d" % (ty, tx)
         if tid not in status:
@@ -304,7 +333,7 @@ def main():
         n_elem += len(els)
 
     generated = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    osm_ts = pbf_timestamp(args.pbf)
+    osm_ts = pbf_timestamp(args.ts_pbf or args.pbf)
     meta = {
         "version": 1,
         "generated": generated,
